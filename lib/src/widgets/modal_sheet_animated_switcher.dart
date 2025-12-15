@@ -15,7 +15,7 @@ AnimationStyle _defaultAnimationStyle = AnimationStyle(
 const BorderRadius _defaultBorderRadius = BorderRadius.all(Radius.circular(36));
 const EdgeInsets _defaultContentPadding = EdgeInsets.symmetric(horizontal: 16);
 const Curve _defaultTransitionCurve = Curves.easeInOutQuad;
-const Curve _defaultFadeCurve = Curves.linear;
+const Curve _defaultFadeCurve = Curves.easeInCubic;
 const Duration _defaultTransitionDuration = Duration(milliseconds: 200);
 
 class FamilyModalSheetAnimatedSwitcher extends StatefulWidget {
