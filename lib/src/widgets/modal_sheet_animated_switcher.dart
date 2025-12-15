@@ -1,6 +1,14 @@
-import 'dart:math' as math;
-
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+
+/// Toggle detailed debug logs (development only)
+const bool _enableLogs = true;
+
+void _log(String message) {
+  if (_enableLogs && kDebugMode) {
+    debugPrint('[ModalSheet] $message');
+  }
+}
 
 AnimationStyle _defaultAnimationStyle = AnimationStyle(
     curve: Curves.easeInOutQuad, duration: Duration(milliseconds: 200));
@@ -55,45 +63,37 @@ class FamilyModalSheetAnimatedSwitcher extends StatefulWidget {
 class _FamilyModalSheetAnimatedSwitcherState
     extends State<FamilyModalSheetAnimatedSwitcher>
     with SingleTickerProviderStateMixin {
-  /// The animation controller for the animated switcher
-  late AnimationController _animationController;
-
-  /// The animation for the height of the animated switcher
-  late Animation<double> _heightAnimation;
+  int _transitionId = 0;
 
   Widget? _currentWidget;
   Widget? _previousWidget;
-  double _previousHeight = 0;
-  double _currentHeight = 0;
-  bool _hasMeasuredOnce = false;
 
-  final GlobalKey _measureKey = GlobalKey();
+  late final AnimationController _fadeController;
+  late Animation<double> _fadeAnimation;
 
   @override
   void initState() {
     super.initState();
+    _log('INIT: pageIndex=${widget.pageIndex}');
 
-    _animationController = AnimationController(
+    _currentWidget = widget.pages.isEmpty
+        ? const SizedBox.shrink()
+        : widget.pages[widget.pageIndex];
+    _previousWidget = null;
+
+    _fadeController = AnimationController(
       vsync: this,
       duration: widget.mainContentAnimationStyle.duration ??
           _defaultTransitionDuration,
       value: 1.0,
     );
-
-    _heightAnimation = Tween<double>(begin: 0, end: 1).animate(
-      CurvedAnimation(
-        parent: _animationController,
-        curve:
-            widget.mainContentAnimationStyle.curve ?? _defaultTransitionCurve,
-        reverseCurve: widget.mainContentAnimationStyle.reverseCurve,
-      ),
+    _fadeAnimation = CurvedAnimation(
+      parent: _fadeController,
+      curve: widget.mainContentAnimationStyle.curve ?? _defaultTransitionCurve,
+      reverseCurve: widget.mainContentAnimationStyle.reverseCurve,
     );
 
-    _currentWidget = widget.pages[widget.pageIndex];
-    _previousWidget = _currentWidget;
-
-    WidgetsBinding.instance
-        .addPostFrameCallback((_) => _measureCurrentWidget());
+    _fadeController.addStatusListener(_handleFadeStatus);
   }
 
   @override
@@ -102,76 +102,97 @@ class _FamilyModalSheetAnimatedSwitcherState
 
     if (oldWidget.pageIndex != widget.pageIndex ||
         oldWidget.pages != widget.pages) {
-      _previousWidget = _currentWidget;
-      _previousHeight = _currentHeight;
+      _log('UPDATE: page ${oldWidget.pageIndex} -> ${widget.pageIndex}');
+      _startTransition();
+    }
 
-      _currentWidget = widget.pages[widget.pageIndex];
+    final oldDuration =
+        oldWidget.mainContentAnimationStyle.duration ?? _defaultTransitionDuration;
+    final newDuration =
+        widget.mainContentAnimationStyle.duration ?? _defaultTransitionDuration;
+    if (oldDuration != newDuration) {
+      _fadeController.duration = newDuration;
+    }
 
-      WidgetsBinding.instance
-          .addPostFrameCallback((_) => _measureCurrentWidget());
-
-      _animationController.forward(from: 0);
+    // Update curve if changed
+    if (oldWidget.mainContentAnimationStyle.curve !=
+            widget.mainContentAnimationStyle.curve ||
+        oldWidget.mainContentAnimationStyle.reverseCurve !=
+            widget.mainContentAnimationStyle.reverseCurve) {
+      _fadeAnimation = CurvedAnimation(
+        parent: _fadeController,
+        curve: widget.mainContentAnimationStyle.curve ?? _defaultTransitionCurve,
+        reverseCurve: widget.mainContentAnimationStyle.reverseCurve,
+      );
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final transitionDuration = widget.mainContentAnimationStyle.duration ??
+        _defaultTransitionDuration;
+    final transitionCurve =
+        widget.mainContentAnimationStyle.curve ?? _defaultTransitionCurve;
+
+    final Widget content = _previousWidget == null
+        ? (_currentWidget ?? const SizedBox.shrink())
+        : AnimatedBuilder(
+            // Tie fade to the same duration/curve as AnimatedSize.
+            // This makes opacity and height transitions start together.
+            animation: _fadeController,
+            builder: (context, child) {
+              final t = _fadeAnimation.value;
+              final prevOpacity = (1.0 - t).clamp(0.0, 1.0);
+              final currOpacity = t.clamp(0.0, 1.0);
+
+              // Current widget defines the size; previous is an overlay and
+              // won't affect layout (prevents "max height" behavior).
+              return Stack(
+                alignment: Alignment.topCenter,
+                clipBehavior: Clip.none,
+                children: [
+                  if (_currentWidget case final current?)
+                    Opacity(
+                      opacity: currOpacity,
+                      child: RepaintBoundary(child: current),
+                    )
+                  else
+                    const SizedBox.shrink(),
+                  if (_previousWidget case final previous?)
+                    Positioned.fill(
+                      child: IgnorePointer(
+                        ignoring: true,
+                        child: ExcludeSemantics(
+                          excluding: true,
+                          child: OverflowBox(
+                            alignment: Alignment.topCenter,
+                            minHeight: 0,
+                            maxHeight: double.infinity,
+                            child: Opacity(
+                              opacity: prevOpacity,
+                              child: RepaintBoundary(child: previous),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              );
+            },
+          );
+
     return Padding(
       padding: widget.mainContentPadding,
       child: ClipRRect(
         borderRadius: widget.mainContentBorderRadius,
         child: ColoredBox(
           color: widget.contentBackgroundColor,
-          child: Stack(
-            children: [
-              // Offstage render of the new widget used for height measurement,
-              // enabling a smooth height interpolation during transition
-              if (_currentWidget case final current?)
-                Offstage(
-                  child: KeyedSubtree(key: _measureKey, child: current),
-                ),
-
-              AnimatedBuilder(
-                animation: _animationController,
-                builder: (context, child) {
-                  final animationValue = _heightAnimation.value;
-                  return switch (animationValue) {
-                    // Animation is in progress
-                    // We want to:
-                    // - animate the height between the previous and current widgets,
-                    // - crossfade the two widgets for visual continuity,
-                    // - ensure no content is clipped during the transition.
-                    < 1.0 => SizedBox(
-                        // Interpolate height based on animation progress
-                        height: _previousHeight +
-                            (_currentHeight - _previousHeight) * animationValue,
-                        child: OverflowBox(
-                          alignment: Alignment.topCenter,
-                          // Allow the content to overflow up to the maximum height of both widgets
-                          // to prevent clipping during the transition
-                          maxHeight: math.max(_previousHeight, _currentHeight),
-                          child: Stack(
-                            children: [
-                              // Fade out the previous widget
-                              if (_previousWidget case final previous?)
-                                Opacity(
-                                    opacity: 1.0 - animationValue,
-                                    child: previous),
-                              // Fade in the current widget
-                              if (_currentWidget case final current?)
-                                Opacity(
-                                    opacity: animationValue, child: current),
-                            ],
-                          ),
-                        ),
-                      ),
-                    // Animation is complete
-                    // We can now display only the final widget without any extra layout or opacity overhead.
-                    _ => _currentWidget ?? const SizedBox.shrink(),
-                  };
-                },
-              ),
-            ],
+          child: AnimatedSize(
+            alignment: Alignment.topCenter,
+            duration: transitionDuration,
+            curve: transitionCurve,
+            clipBehavior: Clip.none,
+            child: content,
           ),
         ),
       ),
@@ -180,32 +201,47 @@ class _FamilyModalSheetAnimatedSwitcherState
 
   @override
   void dispose() {
-    _animationController.dispose();
+    _fadeController.removeStatusListener(_handleFadeStatus);
+    _fadeController.dispose();
     super.dispose();
   }
 
-  /// Measures the current widget's height and updates initial values if needed.
-  ///
-  /// The method uses the [GlobalKey] to find the current context and
-  /// retrieves the height of the widget using the [RenderBox]
-  void _measureCurrentWidget() {
-    final BuildContext? context = _measureKey.currentContext;
-    if (context == null) return;
+  void _handleFadeStatus(AnimationStatus status) {
+    if (!mounted) return;
+    if (status != AnimationStatus.completed) return;
 
-    final renderObject = context.findRenderObject();
-    if (renderObject is! RenderBox || !renderObject.hasSize) return;
+    // Only clear if nothing newer has started.
+    final localTransitionId = _transitionId;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (_transitionId != localTransitionId) return;
+      if (_previousWidget == null) return;
+      setState(() => _previousWidget = null);
+    });
+  }
 
-    final currentHeight = renderObject.size.height;
-
-    // Initial measurement: set previous height to current height
-    if (!_hasMeasuredOnce) {
-      _previousHeight = currentHeight;
-      _hasMeasuredOnce = true;
+  void _startTransition() {
+    if (!mounted) return;
+    if (widget.pages.isEmpty) {
+      setState(() {
+        _previousWidget = null;
+        _currentWidget = const SizedBox.shrink();
+        _transitionId++;
+      });
+      return;
     }
 
-    // Only update and rebuild if the height has changed
-    if (mounted && _currentHeight != currentHeight) {
-      setState(() => _currentHeight = currentHeight);
-    }
+    // Defensive: avoid range errors if pages changed unexpectedly.
+    final nextIndex = widget.pageIndex.clamp(0, widget.pages.length - 1);
+    final nextWidget = widget.pages[nextIndex];
+
+    setState(() {
+      _previousWidget = _currentWidget;
+      _currentWidget = nextWidget;
+      _transitionId++;
+    });
+
+    // Start fade aligned with AnimatedSize duration/curve.
+    _fadeController.forward(from: 0.0);
   }
 }
