@@ -1,3 +1,5 @@
+import 'dart:ui';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
@@ -10,13 +12,25 @@ void _log(String message) {
   }
 }
 
-AnimationStyle _defaultAnimationStyle = AnimationStyle(
-    curve: Curves.easeInOutQuad, duration: Duration(milliseconds: 200));
 const BorderRadius _defaultBorderRadius = BorderRadius.all(Radius.circular(36));
 const EdgeInsets _defaultContentPadding = EdgeInsets.symmetric(horizontal: 16);
-const Curve _defaultTransitionCurve = Curves.easeInOutQuad;
-const Curve _defaultFadeCurve = Curves.easeInCubic;
-const Duration _defaultTransitionDuration = Duration(milliseconds: 200);
+const Duration _defaultTransitionDuration = Duration(milliseconds: 270);
+
+/// Family App custom easing curve for content transitions (opacity/scale/blur)
+const Curve _familyCurve = Cubic(0.26, 0.08, 0.25, 1);
+
+/// Family App custom easing curve for height/size transitions - snappier
+const Curve _familySizeCurve = Cubic(0.26, 1, 0.5, 1);
+
+/// Scale animation constants
+const double _initialScale = 0.96;
+const double _targetScale = 1.0;
+
+/// Blur animation constants
+const double _maxBlurSigma = 2.0;
+
+/// Opacity completes at 70% of total duration (~190ms of 270ms)
+const double _opacityIntervalEnd = 0.7;
 
 class FamilyModalSheetAnimatedSwitcher extends StatefulWidget {
   FamilyModalSheetAnimatedSwitcher({
@@ -24,12 +38,10 @@ class FamilyModalSheetAnimatedSwitcher extends StatefulWidget {
     required this.pageIndex,
     required this.pages,
     required this.contentBackgroundColor,
-    AnimationStyle? mainContentAnimationStyle,
+    this.mainContentAnimationStyle,
     EdgeInsets? mainContentPadding,
     BorderRadius? mainContentBorderRadius,
-  })  : mainContentAnimationStyle =
-            mainContentAnimationStyle ?? _defaultAnimationStyle,
-        mainContentPadding = mainContentPadding ?? _defaultContentPadding,
+  })  : mainContentPadding = mainContentPadding ?? _defaultContentPadding,
         mainContentBorderRadius =
             mainContentBorderRadius ?? _defaultBorderRadius,
         assert(pageIndex >= 0 && pageIndex < pages.length && pages.isNotEmpty);
@@ -54,7 +66,7 @@ class FamilyModalSheetAnimatedSwitcher extends StatefulWidget {
   final BorderRadius mainContentBorderRadius;
 
   /// The animation style of the animated switcher
-  final AnimationStyle mainContentAnimationStyle;
+  final AnimationStyle? mainContentAnimationStyle;
 
   @override
   State<FamilyModalSheetAnimatedSwitcher> createState() =>
@@ -88,18 +100,67 @@ class _FamilyModalSheetAnimatedSwitcherState
 
   @override
   Widget build(BuildContext context) {
-    final transitionDuration = widget.mainContentAnimationStyle.duration ??
+    final transitionDuration = widget.mainContentAnimationStyle?.duration ??
         _defaultTransitionDuration;
     final transitionCurve =
-        widget.mainContentAnimationStyle.curve ?? _defaultTransitionCurve;
+        widget.mainContentAnimationStyle?.curve ?? _familySizeCurve;
 
     final Widget content = AnimatedSwitcher(
       duration: transitionDuration,
       reverseDuration: transitionDuration,
-      switchInCurve: _defaultFadeCurve,
-      switchOutCurve: _defaultFadeCurve,
-      transitionBuilder: (child, animation) =>
-          FadeTransition(opacity: animation, child: child),
+      // Curves handled in transitionBuilder, so use linear here
+      switchInCurve: Curves.linear,
+      switchOutCurve: Curves.linear,
+        transitionBuilder: (child, animation) {
+        // Opacity Animation
+        // Enter: Full duration (270ms)
+        // Exit: First 190ms (70%) of the duration
+        // We use reverseCurve with an interval of [0.3, 1.0] because reverse animation
+        // goes from 1.0 to 0.0. The interval covers the first 70% of the reverse timeline.
+        final opacityAnimation = CurvedAnimation(
+          parent: animation,
+          curve: _familyCurve,
+          reverseCurve: const Interval(
+            1.0 - _opacityIntervalEnd, // ~0.3
+            1.0,
+            curve: _familyCurve,
+          ),
+        );
+
+        // Scale & Blur Animation
+        // Enter & Exit: Full duration (270ms)
+        final scaleBlurAnimation = CurvedAnimation(
+          parent: animation,
+          curve: _familyCurve,
+        );
+
+        return FadeTransition(
+          opacity: opacityAnimation,
+          child: AnimatedBuilder(
+            animation: scaleBlurAnimation,
+            builder: (context, child) {
+              final scale = _initialScale +
+                  ((_targetScale - _initialScale) * scaleBlurAnimation.value);
+              final blur = _maxBlurSigma * (1 - scaleBlurAnimation.value);
+
+              return Transform.scale(
+                scale: scale,
+                child: blur > 0.01
+                    ? ImageFiltered(
+                        imageFilter: ImageFilter.blur(
+                          sigmaX: blur,
+                          sigmaY: blur,
+                          tileMode: TileMode.decal,
+                        ),
+                        child: child,
+                      )
+                    : child,
+              );
+            },
+            child: child,
+          ),
+        );
+      },
       layoutBuilder: (currentChild, previousChildren) {
         return Stack(
           alignment: Alignment.topCenter,
