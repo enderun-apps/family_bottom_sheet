@@ -1,5 +1,3 @@
-import 'dart:ui';
-
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
@@ -25,9 +23,6 @@ const Curve _familySizeCurve = Cubic(0.26, 1, 0.5, 1);
 /// Scale animation constants
 const double _initialScale = 0.96;
 const double _targetScale = 1.0;
-
-/// Blur animation constants
-const double _maxBlurSigma = 2.0;
 
 /// Opacity completes at 70% of total duration (~190ms of 270ms)
 const double _opacityIntervalEnd = 0.7;
@@ -111,52 +106,33 @@ class _FamilyModalSheetAnimatedSwitcherState
       // Curves handled in transitionBuilder, so use linear here
       switchInCurve: Curves.linear,
       switchOutCurve: Curves.linear,
-        transitionBuilder: (child, animation) {
+      transitionBuilder: (child, animation) {
         // Opacity Animation
-        // Enter: Full duration (270ms)
-        // Exit: First 190ms (70%) of the duration
-        // We use reverseCurve with an interval of [0.3, 1.0] because reverse animation
-        // goes from 1.0 to 0.0. The interval covers the first 70% of the reverse timeline.
+        // Enter: Full duration (270ms) with Linear curve for instant response
+        // Exit: First 190ms (70%) with Linear curve to avoid fade-out delay
         final opacityAnimation = CurvedAnimation(
           parent: animation,
-          curve: _familyCurve,
+          curve: Curves.linear,
           reverseCurve: const Interval(
             1.0 - _opacityIntervalEnd, // ~0.3
             1.0,
-            curve: _familyCurve,
+            curve: Curves.linear,
           ),
         );
 
-        // Scale & Blur Animation
+        // Scale Animation
         // Enter & Exit: Full duration (270ms)
-        final scaleBlurAnimation = CurvedAnimation(
+        final scaleAnimation = CurvedAnimation(
           parent: animation,
           curve: _familyCurve,
+          reverseCurve: _familyCurve,
         );
 
         return FadeTransition(
           opacity: opacityAnimation,
-          child: AnimatedBuilder(
-            animation: scaleBlurAnimation,
-            builder: (context, child) {
-              final scale = _initialScale +
-                  ((_targetScale - _initialScale) * scaleBlurAnimation.value);
-              final blur = _maxBlurSigma * (1 - scaleBlurAnimation.value);
-
-              return Transform.scale(
-                scale: scale,
-                child: blur > 0.01
-                    ? ImageFiltered(
-                        imageFilter: ImageFilter.blur(
-                          sigmaX: blur,
-                          sigmaY: blur,
-                          tileMode: TileMode.decal,
-                        ),
-                        child: child,
-                      )
-                    : child,
-              );
-            },
+          child: ScaleTransition(
+            scale: Tween<double>(begin: _initialScale, end: _targetScale)
+                .animate(scaleAnimation),
             child: child,
           ),
         );
