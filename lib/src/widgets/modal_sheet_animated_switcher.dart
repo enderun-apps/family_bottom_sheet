@@ -1,3 +1,5 @@
+import 'dart:ui';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
@@ -10,23 +12,50 @@ void _log(String message) {
   }
 }
 
-const BorderRadius _defaultBorderRadius = BorderRadius.all(Radius.circular(36));
-const EdgeInsets _defaultContentPadding = EdgeInsets.symmetric(horizontal: 16);
-const Duration _defaultTransitionDuration = Duration(milliseconds: 270);
+const BorderRadius _defaultBorderRadius =
+    BorderRadius.all(Radius.circular(36));
+const EdgeInsets _defaultContentPadding =
+    EdgeInsets.symmetric(horizontal: 16);
 
-/// Family App custom easing curve for content transitions
-const Curve _familyCurve = Cubic(0.26, 0.08, 0.25, 1);
+// ─── Timing ──────────────────────────────────────────────────────────────────
 
-/// Family App custom easing curve for height/size transitions - snappier
-const Curve _familySizeCurve = Cubic(0.26, 1, 0.5, 1);
+/// Page/sheet transitions: 250ms.
+/// Aligned with animation-design.mdc duration guide and AppAnimation.duration.
+/// Snappier than 270ms while staying within the 200-300ms modal range.
+const Duration _defaultTransitionDuration = Duration(milliseconds: 250);
 
-const double _initialScale = 0.96;
-const double _targetScale = 1.0;
-
-/// Opacity duration
+/// Opacity completes in the first 100ms — fast crossfade that doesn't linger.
 const Duration _opacityDuration = Duration(milliseconds: 100);
 
-/// Track peak animation value to distinguish normal exit from interrupted enter
+// ─── Curves ──────────────────────────────────────────────────────────────────
+
+/// Enter: easeOutCubic — fast start, soft settle. iOS-native feel.
+/// animation-design.mdc: "Sheet/modal opening → Curves.easeOutCubic"
+const Curve _enterCurve = Curves.easeOutCubic;
+
+/// Reverse: easeInCubic — during reverse (1→0) this produces ease-out FEEL.
+/// Parent goes 1→0: easeInCubic drops FAST then slows = responsive exit.
+/// animation-design.mdc: "CurvedAnimation.reverseCurve math"
+const Curve _exitCurve = Curves.easeInCubic;
+
+/// Size curve — snappy with subtle overshoot for height transitions.
+const Curve _sizeCurve = Cubic(0.26, 1.0, 0.5, 1.0);
+
+// ─── Scale ───────────────────────────────────────────────────────────────────
+
+/// Subtle scale-in for card-level crossfade transitions.
+const double _initialScale = 0.97;
+const double _targetScale = 1.0;
+
+// ─── Blur ────────────────────────────────────────────────────────────────────
+
+/// web-animation-design.mdc: "Toggle/swap → blur+fade crossfade (blur 4px)"
+/// practical-tips.mdc: "Add subtle blur (under 20px) to mask imperfections"
+/// 4px matches the "toggle/swap crossfade → blur 4px" rule exactly.
+/// Kept under the 20px performance ceiling (especially important on iOS).
+const double _maxBlurSigma = 4.0;
+
+/// Track peak animation value to distinguish normal exit from interrupted enter.
 final Expando<double> _animationPeakValue = Expando<double>();
 
 class FamilyModalSheetAnimatedSwitcher extends StatefulWidget {
@@ -83,10 +112,6 @@ class _FamilyModalSheetAnimatedSwitcherState
   @override
   void didUpdateWidget(FamilyModalSheetAnimatedSwitcher oldWidget) {
     super.didUpdateWidget(oldWidget);
-
-    // Sadece sayfa indexi değiştiğinde geçiş animasyonunu tetikle.
-    // Eğer sadece liste içeriği değiştiyse (örneğin parent rebuild olduysa)
-    // animasyon çalışmasın, sadece içerik güncellensin.
     if (oldWidget.pageIndex != widget.pageIndex) {
       _log('UPDATE: page ${oldWidget.pageIndex} -> ${widget.pageIndex}');
       _transitionId++;
@@ -95,114 +120,134 @@ class _FamilyModalSheetAnimatedSwitcherState
 
   @override
   Widget build(BuildContext context) {
-    final transitionDuration = widget.mainContentAnimationStyle?.duration ??
-        _defaultTransitionDuration;
-    
-    // Ensure duration is not zero to avoid division by zero
-    final durationMs = transitionDuration.inMilliseconds > 0 
-        ? transitionDuration.inMilliseconds 
+    final transitionDuration =
+        widget.mainContentAnimationStyle?.duration ??
+            _defaultTransitionDuration;
+
+    final durationMs = transitionDuration.inMilliseconds > 0
+        ? transitionDuration.inMilliseconds
         : 1;
-        
+
     final opacityIntervalEnd =
         (_opacityDuration.inMilliseconds / durationMs).clamp(0.0, 1.0);
-        
+
     final transitionCurve =
-        widget.mainContentAnimationStyle?.curve ?? _familySizeCurve;
+        widget.mainContentAnimationStyle?.curve ?? _sizeCurve;
 
     final currentWidget = _safePageAt(widget.pageIndex);
 
     final Widget content = AnimatedSwitcher(
       duration: transitionDuration,
       reverseDuration: transitionDuration,
-      // Curves handled in transitionBuilder, so use linear here
       switchInCurve: Curves.linear,
       switchOutCurve: Curves.linear,
       transitionBuilder: (child, animation) {
         final scaleAnimation = CurvedAnimation(
           parent: animation,
-          curve: _familyCurve,
-          reverseCurve: _familyCurve,
+          curve: _enterCurve,
+          reverseCurve: _exitCurve,
         );
 
-        // Dual formula approach - both enter and exit complete in FIRST 100ms
-        // Uses peak value tracking to handle interrupted transitions
+        // GlobalObjectKey lets Flutter track and reparent this element
+        // when the layoutBuilder moves it into Positioned.fill for exit.
+        // Without it, the child's State is destroyed and recreated
+        // (scroll position lost, data reloaded → visible flash).
         return AnimatedBuilder(
+          key: GlobalObjectKey(animation),
           animation: animation,
           builder: (context, _) {
-            final isExiting = animation.status == AnimationStatus.reverse ||
-                animation.status == AnimationStatus.dismissed;
+            final isExiting =
+                animation.status == AnimationStatus.reverse ||
+                    animation.status == AnimationStatus.dismissed;
 
-            // Track peak value during forward animation
             if (!isExiting) {
-              final currentPeak = _animationPeakValue[animation] ?? 0.0;
+              final currentPeak =
+                  _animationPeakValue[animation] ?? 0.0;
               if (animation.value > currentPeak) {
                 _animationPeakValue[animation] = animation.value;
               }
             }
 
+            // ── Opacity ─────────────────────────────────────────────
             final double opacity;
             if (isExiting) {
               final peak = _animationPeakValue[animation] ?? 1.0;
-              
-              // Exit Logic:
-              // We want to fade out in the first 100ms of the exit animation.
-              // The exit animation moves 'value' from 'peak' down to 0.
-              // 100ms corresponds to a travel of 'opacityIntervalEnd' in value space.
-              
               if (peak > opacityIntervalEnd) {
-                 // CASE 1: Fully Opaque or Sustain Phase
-                 // We have more than 100ms worth of "opaque" time accumulated.
-                 // We map [peak, peak - opacityIntervalEnd] -> Opacity [1.0, 0.0]
-                 // This ensures we start fading immediately from 1.0 down to 0.0.
-                 final endOfFadeValue = peak - opacityIntervalEnd;
-                 opacity = ((animation.value - endOfFadeValue) / opacityIntervalEnd).clamp(0.0, 1.0);
+                final endOfFadeValue = peak - opacityIntervalEnd;
+                opacity = ((animation.value - endOfFadeValue) /
+                        opacityIntervalEnd)
+                    .clamp(0.0, 1.0);
               } else {
-                 // CASE 2: Interrupted Fade-In
-                 // We never reached full opacity or the "sustain" phase.
-                 // We simply reverse the fade-in curve.
-                 // This corresponds to retracing the path: Opacity [peakOpacity, 0.0]
-                 opacity = (animation.value / opacityIntervalEnd).clamp(0.0, 1.0);
+                opacity = (animation.value / opacityIntervalEnd)
+                    .clamp(0.0, 1.0);
               }
             } else {
-              // Enter Logic:
-              // Value 0 -> interval maps to Opacity 0 -> 1
-              opacity = (animation.value / opacityIntervalEnd).clamp(0.0, 1.0);
+              opacity = (animation.value / opacityIntervalEnd)
+                  .clamp(0.0, 1.0);
             }
 
-            return Opacity(
-              opacity: opacity,
-              child: ScaleTransition(
-                scale: Tween<double>(begin: _initialScale, end: _targetScale)
-                    .animate(scaleAnimation),
-                child: child,
+            // ── Scale ───────────────────────────────────────────────
+            final scaleValue =
+                _initialScale +
+                    (_targetScale - _initialScale) *
+                        scaleAnimation.value;
+
+            // ── Blur ────────────────────────────────────────────────
+            final blurProgress =
+                (1.0 - scaleAnimation.value).clamp(0.0, 1.0);
+            final sigma = _maxBlurSigma * blurProgress;
+
+            // ── Compose layers ──────────────────────────────────────
+            // Tree shape is ALWAYS stable:
+            //   ExcludeSemantics → IgnorePointer → Opacity →
+            //   ImageFiltered → Transform → child
+            // IgnorePointer/ExcludeSemantics toggle via isExiting,
+            // keeping the structure identical for enter and exit so
+            // Flutter never tears down and recreates elements.
+            return ExcludeSemantics(
+              excluding: isExiting,
+              child: IgnorePointer(
+                ignoring: isExiting,
+                child: Opacity(
+                  opacity: opacity,
+                  child: ImageFiltered(
+                    imageFilter: ImageFilter.blur(
+                      sigmaX: sigma,
+                      sigmaY: sigma,
+                      tileMode: TileMode.decal,
+                    ),
+                    child: Transform.scale(
+                      scale: scaleValue,
+                      child: child,
+                    ),
+                  ),
+                ),
               ),
             );
           },
         );
       },
       layoutBuilder: (currentChild, previousChildren) {
-        return Stack(
-          alignment: Alignment.topCenter,
-          clipBehavior: Clip.none,
-          children: <Widget>[
-            if (currentChild != null) currentChild,
-            ...previousChildren.map(
-              (child) => Positioned.fill(
-                child: IgnorePointer(
-                  ignoring: true,
-                  child: ExcludeSemantics(
-                    excluding: true,
+        return LayoutBuilder(
+          builder: (context, constraints) {
+            return Stack(
+              alignment: Alignment.topCenter,
+              clipBehavior: Clip.none,
+              children: <Widget>[
+                if (currentChild != null) currentChild,
+                ...previousChildren.map(
+                  (child) => Positioned.fill(
                     child: OverflowBox(
                       alignment: Alignment.topCenter,
                       minHeight: 0,
-                      maxHeight: double.infinity,
+                      maxHeight: constraints.maxHeight,
                       child: child,
                     ),
                   ),
                 ),
-              ),
-            ),
-          ],
+              ],
+            );
+          },
         );
       },
       child: KeyedSubtree(
